@@ -1,13 +1,14 @@
 package flutter
 
 import (
-	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 
 	"github.com/go-flutter-desktop/go-flutter/embedder"
 	"github.com/go-flutter-desktop/go-flutter/internal/tasker"
 	"github.com/go-flutter-desktop/go-flutter/plugin"
+	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 type messenger struct {
@@ -37,9 +38,13 @@ func newMessenger(engine *embedder.FlutterEngine) *messenger {
 func (m *messenger) SendWithReply(channel string, binaryMessage []byte) (binaryReply []byte, err error) {
 	reply := make(chan []byte)
 	defer close(reply)
-	responseHandle, err := m.engine.CreatePlatformMessageResponseHandle(func(binaryMessage []byte) {
-		reply <- binaryMessage
-	})
+	callbackHandle := &embedder.DataCallback{
+		Handle: func(binaryMessage []byte) {
+			reply <- binaryMessage
+		},
+	}
+	defer runtime.KeepAlive(callbackHandle)
+	responseHandle, err := m.engine.CreatePlatformMessageResponseHandle(callbackHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -50,14 +55,9 @@ func (m *messenger) SendWithReply(channel string, binaryMessage []byte) (binaryR
 		Message:        binaryMessage,
 		ResponseHandle: responseHandle,
 	}
-	res := m.engine.SendPlatformMessage(msg)
+	err = m.engine.SendPlatformMessage(msg)
 	if err != nil {
-		if ferr, ok := err.(*plugin.FlutterError); ok {
-			return nil, ferr
-		}
-	}
-	if res != embedder.ResultSuccess {
-		return nil, errors.New("failed to send message")
+		return nil, err
 	}
 
 	// wait for a reply and return
@@ -71,14 +71,9 @@ func (m *messenger) Send(channel string, binaryMessage []byte) (err error) {
 		Channel: channel,
 		Message: binaryMessage,
 	}
-	res := m.engine.SendPlatformMessage(msg)
+	err = m.engine.SendPlatformMessage(msg)
 	if err != nil {
-		if ferr, ok := err.(*plugin.FlutterError); ok {
-			return ferr
-		}
-	}
-	if res != embedder.ResultSuccess {
-		return errors.New("failed to send message")
+		return err
 	}
 
 	return nil
@@ -123,8 +118,6 @@ type responseSender struct {
 	engineTasker *tasker.Tasker
 }
 
-var _ plugin.ResponseSender = responseSender{} // compile-time type check
-
 func (r responseSender) Send(binaryReply []byte) {
 	if !r.message.ExpectsResponse() {
 		return // quick path when no response should be sent
@@ -133,12 +126,11 @@ func (r responseSender) Send(binaryReply []byte) {
 	// TODO: detect multiple responses on the same message and spam the log
 	// about it.
 
-	// It would be preferable to replace this with channels so sending
-	// doesn't have to wait on the main loop to come around.
+	glfw.PostEmptyEvent()
 	go r.engineTasker.Do(func() {
-		res := r.engine.SendPlatformMessageResponse(r.message.ResponseHandle, binaryReply)
-		if res != embedder.ResultSuccess {
-			fmt.Println("go-flutter: failed sending response for message on channel " + r.message.Channel)
+		err := r.engine.SendPlatformMessageResponse(r.message.ResponseHandle, binaryReply)
+		if err != nil {
+			fmt.Printf("go-flutter: failed sending response for message on channel '%s': %v", r.message.Channel, err)
 		}
 	})
 }

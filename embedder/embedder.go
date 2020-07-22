@@ -1,22 +1,24 @@
 package embedder
 
+import "C"
+
 // #include "embedder.h"
-// FlutterEngineResult initEngine(void *user_data, FlutterEngine *engine, FlutterProjectArgs * Args,
-//						 const char *const * vmArgs, int nVmAgrs);
+// #include <stdlib.h>
+// FlutterEngineResult runFlutter(void *user_data, FlutterEngine *engine, FlutterProjectArgs * Args);
 // FlutterEngineResult
 // createMessageResponseHandle(FlutterEngine engine, void *user_data,
 //                             FlutterPlatformMessageResponseHandle **reply);
-// char** makeCharArray(int size);
-// void setArrayString(char **a, char *s, int n);
 // const int32_t kFlutterSemanticsNodeIdBatchEnd = -1;
 // const int32_t kFlutterSemanticsCustomActionIdBatchEnd = -1;
+// FlutterEngineAOTDataSource* createAOTDataSource(FlutterEngineAOTDataSource *data_in, const char * elfSnapshotPath);
 import "C"
 import (
-	"errors"
 	"fmt"
 	"runtime"
 	"sync"
 	"unsafe"
+
+	"github.com/pkg/errors"
 )
 
 // Result corresponds to the C.enum retuned by the shared flutter library
@@ -73,54 +75,104 @@ type FlutterEngine struct {
 	// Engine arguments
 	AssetsPath  string
 	IcuDataPath string
+
+	// AOT ELF snopshot path
+	// only required for AOT app.
+	ElfSnapshotPath string
+	aotDataSource   C.FlutterEngineAOTData
 }
 
-// NewFlutterEngine creates an empty FlutterEngine
-// and assigns it an index for global lookup.
+// GoError convert a FlutterEngineResult to a golang readable error
+func (res Result) GoError(caller string) error {
+	switch res {
+	case ResultSuccess:
+		return nil
+	case ResultInvalidLibraryVersion:
+		return errors.Errorf("%s returned result code %d (invalid library version)", caller, res)
+	case ResultInvalidArguments:
+		return errors.Errorf("%s returned result code %d (invalid arguments)", caller, res)
+	case ResultInternalInconsistency:
+		return errors.Errorf("%s returned result code %d (internal inconsistency)", caller, res)
+	case ResultEngineNotRunning:
+		return errors.Errorf("%s returned result code %d (engine not running)", caller, res)
+	default:
+		return errors.Errorf("%s returned result code %d (unknown result code)", caller, res)
+	}
+}
+
+// NewFlutterEngine creates an empty FlutterEngine.
 func NewFlutterEngine() *FlutterEngine {
 	return &FlutterEngine{}
 }
 
-// Runs an initialized engine in a background thread.
-func (flu *FlutterEngine) Run() Result {
-	if flu.Engine == nil {
-		fmt.Printf("go-flutter: The engine must be ini")
-		return ResultInvalidArguments
+// Run launches the Flutter Engine in a background thread.
+func (flu *FlutterEngine) Run(userData unsafe.Pointer, vmArgs []string) error {
+
+	cVMArgs := C.malloc(C.size_t(len(vmArgs)) * C.size_t(unsafe.Sizeof(uintptr(0))))
+	defer C.free(cVMArgs)
+
+	a := (*[1<<30 - 1]*C.char)(cVMArgs)
+
+	for idx, substring := range vmArgs {
+		a[idx] = C.CString(substring)
+		defer C.free(unsafe.Pointer(a[idx]))
 	}
 
-	res := C.FlutterEngineRunInitialized(flu.Engine)
-	return (Result)(res)
-}
+	assetsPath := C.CString(flu.AssetsPath)
+	icuDataPath := C.CString(flu.IcuDataPath)
+	defer C.free(unsafe.Pointer(assetsPath))
+	defer C.free(unsafe.Pointer(icuDataPath))
 
-// Init the Flutter Engine.
-func (flu *FlutterEngine) Init(userData unsafe.Pointer, vmArgs []string) Result {
 	args := C.FlutterProjectArgs{
-		assets_path:   C.CString(flu.AssetsPath),
-		icu_data_path: C.CString(flu.IcuDataPath),
+		assets_path:                assetsPath,
+		icu_data_path:              icuDataPath,
+		command_line_argv:          (**C.char)(cVMArgs),
+		command_line_argc:          C.int(len(vmArgs)),
+		shutdown_dart_vm_when_done: true,
+	}
+
+	if C.FlutterEngineRunsAOTCompiledDartCode() {
+		// elfSnapshotPath := C.CString(flu.ElfSnapshotPath)
+		// defer C.free(unsafe.Pointer(elfSnapshotPath))
+
+		// dataIn := C.FlutterEngineAOTDataSource{}
+
+		// C.createAOTDataSource(&dataIn, elfSnapshotPath)
+		// res := (Result)(C.FlutterEngineCreateAOTData(&dataIn, &flu.aotDataSource))
+		// if res != ResultSuccess {
+		// return res.GoError("C.FlutterEngineCreateAOTData()")
+		// }
+		// args.aot_data = flu.aotDataSource
 	}
 
 	args.struct_size = C.size_t(unsafe.Sizeof(args))
 
-	cVMArgs := C.makeCharArray(C.int(len(vmArgs)))
-	for i, s := range vmArgs {
-		C.setArrayString(cVMArgs, C.CString(s), C.int(i))
-	}
-
-	res := C.initEngine(userData, &flu.Engine, &args, cVMArgs, C.int(len(vmArgs)))
+	res := (Result)(C.runFlutter(userData, &flu.Engine, &args))
 	if flu.Engine == nil {
-		return ResultInvalidArguments
+		return ResultInvalidArguments.GoError("engine.Run()")
 	}
 
-	return (Result)(res)
+	return res.GoError("engine.Run()")
 }
 
 // Shutdown stops the Flutter engine.
-func (flu *FlutterEngine) Shutdown() Result {
+func (flu *FlutterEngine) Shutdown() error {
 	flu.sync.Lock()
 	defer flu.sync.Unlock()
 	flu.closed = true
-	res := C.FlutterEngineShutdown(flu.Engine)
-	return (Result)(res)
+
+	res := (Result)(C.FlutterEngineShutdown(flu.Engine))
+	if res != ResultSuccess {
+		return res.GoError("engine.Shutdown()")
+	}
+
+	if C.FlutterEngineRunsAOTCompiledDartCode() {
+		// res := (Result)(C.FlutterEngineCollectAOTData(flu.aotDataSource))
+		// if res != ResultSuccess {
+		// return res.GoError("engine.Shutdown()")
+		// }
+	}
+	return nil
 }
 
 // PointerPhase corresponds to the C.enum describing phase of the mouse pointer.
@@ -168,7 +220,6 @@ const (
 // PointerEvent represents the position and phase of the mouse at a given time.
 type PointerEvent struct {
 	Phase        PointerPhase
-	Timestamp    int64
 	X            float64
 	Y            float64
 	SignalKind   PointerSignalKind
@@ -178,12 +229,12 @@ type PointerEvent struct {
 }
 
 // SendPointerEvent is used to send an PointerEvent to the Flutter engine.
-func (flu *FlutterEngine) SendPointerEvent(event PointerEvent) Result {
+func (flu *FlutterEngine) SendPointerEvent(event PointerEvent) error {
 	cPointerEvent := C.FlutterPointerEvent{
 		phase:          (C.FlutterPointerPhase)(event.Phase),
 		x:              C.double(event.X),
 		y:              C.double(event.Y),
-		timestamp:      C.size_t(event.Timestamp),
+		timestamp:      C.size_t(FlutterEngineGetCurrentTime()),
 		signal_kind:    (C.FlutterPointerSignalKind)(event.SignalKind),
 		device_kind:    (C.FlutterPointerDeviceKind)(PointerDeviceKindMouse),
 		scroll_delta_x: C.double(event.ScrollDeltaX),
@@ -194,7 +245,7 @@ func (flu *FlutterEngine) SendPointerEvent(event PointerEvent) Result {
 
 	res := C.FlutterEngineSendPointerEvent(flu.Engine, &cPointerEvent, 1)
 
-	return (Result)(res)
+	return (Result)(res).GoError("engine.SendPointerEvent")
 }
 
 // WindowMetricsEvent represents a window's resolution.
@@ -206,7 +257,7 @@ type WindowMetricsEvent struct {
 
 // SendWindowMetricsEvent is used to send a WindowMetricsEvent to the Flutter
 // Engine.
-func (flu *FlutterEngine) SendWindowMetricsEvent(event WindowMetricsEvent) Result {
+func (flu *FlutterEngine) SendWindowMetricsEvent(event WindowMetricsEvent) error {
 	cMetricEvent := C.FlutterWindowMetricsEvent{
 		width:       C.size_t(event.Width),
 		height:      C.size_t(event.Height),
@@ -216,7 +267,7 @@ func (flu *FlutterEngine) SendWindowMetricsEvent(event WindowMetricsEvent) Resul
 
 	res := C.FlutterEngineSendWindowMetricsEvent(flu.Engine, &cMetricEvent)
 
-	return (Result)(res)
+	return (Result)(res).GoError("engine.SendWindowMetricsEvent()")
 }
 
 // PlatformMessage represents a binary message sent from or to the flutter
@@ -243,19 +294,47 @@ func (p PlatformMessage) ExpectsResponse() bool {
 	return p.ResponseHandle != 0
 }
 
+// UpdateSystemLocale is used to update the flutter locale to the system locale
+func (flu *FlutterEngine) UpdateSystemLocale(lang, country, script string) error {
+	languageCode := C.CString(lang)
+	countryCode := C.CString(country)
+	scriptCode := C.CString(script)
+	defer C.free(unsafe.Pointer(languageCode))
+	defer C.free(unsafe.Pointer(countryCode))
+	defer C.free(unsafe.Pointer(scriptCode))
+
+	locale := C.FlutterLocale{
+		language_code: languageCode,
+		country_code:  countryCode,
+		script_code:   scriptCode,
+	}
+
+	locale.struct_size = C.size_t(unsafe.Sizeof(locale))
+	arr := (**C.FlutterLocale)(C.malloc(locale.struct_size))
+	defer C.free(unsafe.Pointer(arr))
+	(*[1]*C.FlutterLocale)(unsafe.Pointer(arr))[0] = &locale
+
+	res := C.FlutterEngineUpdateLocales(flu.Engine, arr, (C.size_t)(1))
+
+	return (Result)(res).GoError("engine.UpdateSystemLocale()")
+}
+
 // SendPlatformMessage is used to send a PlatformMessage to the Flutter engine.
-func (flu *FlutterEngine) SendPlatformMessage(msg *PlatformMessage) Result {
+func (flu *FlutterEngine) SendPlatformMessage(msg *PlatformMessage) error {
 	flu.sync.Lock()
 	defer flu.sync.Unlock()
 	if flu.closed {
-		return ResultEngineNotRunning
+		return ResultEngineNotRunning.GoError("engine.SendPlatformMessage()")
 	}
 
+	message := C.CBytes(msg.Message)
+	channel := C.CString(msg.Channel)
+	defer C.free(message)
+	defer C.free(unsafe.Pointer(channel))
+
 	cPlatformMessage := C.FlutterPlatformMessage{
-		channel: C.CString(msg.Channel),
-		// TODO: who is responsible for free-ing this C alloc? And can they be
-		// freed when this call returns? Or are they stil used at that time?
-		message:      (*C.uint8_t)(C.CBytes(msg.Message)),
+		channel:      channel,
+		message:      (*C.uint8_t)(message),
 		message_size: C.size_t(len(msg.Message)),
 
 		response_handle: (*C.FlutterPlatformMessageResponseHandle)(unsafe.Pointer(msg.ResponseHandle)),
@@ -268,7 +347,7 @@ func (flu *FlutterEngine) SendPlatformMessage(msg *PlatformMessage) Result {
 		&cPlatformMessage,
 	)
 
-	return (Result)(res)
+	return (Result)(res).GoError("engine.SendPlatformMessage()")
 }
 
 // SendPlatformMessageResponse is used to send a message to the Flutter side
@@ -276,81 +355,83 @@ func (flu *FlutterEngine) SendPlatformMessage(msg *PlatformMessage) Result {
 func (flu *FlutterEngine) SendPlatformMessageResponse(
 	responseTo PlatformMessageResponseHandle,
 	encodedMessage []byte,
-) Result {
+) error {
+
+	message := C.CBytes(encodedMessage)
+	defer C.free(message)
+
 	res := C.FlutterEngineSendPlatformMessageResponse(
 		flu.Engine,
 		(*C.FlutterPlatformMessageResponseHandle)(unsafe.Pointer(responseTo)),
-		// TODO: who is responsible for free-ing this C alloc? And can they be
-		// freed when this call returns? Or are they stil used at that time?
-		(*C.uint8_t)(C.CBytes(encodedMessage)),
+		(*C.uint8_t)(message),
 		(C.size_t)(len(encodedMessage)),
 	)
 
-	return (Result)(res)
+	return (Result)(res).GoError("engine.SendPlatformMessageResponse()")
 }
 
 // RunTask inform the engine to run the specified task.
-func (flu *FlutterEngine) RunTask(task *FlutterTask) Result {
+func (flu *FlutterEngine) RunTask(task *FlutterTask) error {
 	res := C.FlutterEngineRunTask(flu.Engine, task)
-	return (Result)(res)
+	return (Result)(res).GoError("engine.RunTask()")
 }
 
 // RegisterExternalTexture registers an external texture with a unique identifier.
-func (flu *FlutterEngine) RegisterExternalTexture(textureID int64) Result {
+func (flu *FlutterEngine) RegisterExternalTexture(textureID int64) error {
 	flu.sync.Lock()
 	defer flu.sync.Unlock()
 	if flu.closed {
-		return ResultEngineNotRunning
+		return ResultEngineNotRunning.GoError("engine.RegisterExternalTexture()")
 	}
 	res := C.FlutterEngineRegisterExternalTexture(flu.Engine, C.int64_t(textureID))
-	return (Result)(res)
+	return (Result)(res).GoError("engine.RegisterExternalTexture()")
 }
 
 // UnregisterExternalTexture unregisters a previous texture registration.
-func (flu *FlutterEngine) UnregisterExternalTexture(textureID int64) Result {
+func (flu *FlutterEngine) UnregisterExternalTexture(textureID int64) error {
 	flu.sync.Lock()
 	defer flu.sync.Unlock()
 	if flu.closed {
-		return ResultEngineNotRunning
+		return ResultEngineNotRunning.GoError("engine.UnregisterExternalTexture()")
 	}
 	res := C.FlutterEngineUnregisterExternalTexture(flu.Engine, C.int64_t(textureID))
-	return (Result)(res)
+	return (Result)(res).GoError("engine.UnregisterExternalTexture()")
 }
 
 // MarkExternalTextureFrameAvailable marks that a new texture frame is
 // available for a given texture identifier.
-func (flu *FlutterEngine) MarkExternalTextureFrameAvailable(textureID int64) Result {
+func (flu *FlutterEngine) MarkExternalTextureFrameAvailable(textureID int64) error {
 	flu.sync.Lock()
 	defer flu.sync.Unlock()
 	if flu.closed {
-		return ResultEngineNotRunning
+		return ResultEngineNotRunning.GoError("engine.MarkExternalTextureFrameAvailable()")
 	}
 	res := C.FlutterEngineMarkExternalTextureFrameAvailable(flu.Engine, C.int64_t(textureID))
-	return (Result)(res)
+	return (Result)(res).GoError("engine.MarkExternalTextureFrameAvailable()")
 }
 
 // DataCallback is a function called when a PlatformMessage response send back
 // to the embedder.
-type DataCallback func(binaryReply []byte)
+type DataCallback struct {
+	// Handle func
+	Handle func(binaryReply []byte)
+}
 
 // CreatePlatformMessageResponseHandle creates a platform message response
 // handle that allows the embedder to set a native callback for a response to a
 // message.
 // Must be collected via `ReleasePlatformMessageResponseHandle` after the call
 // to `SendPlatformMessage`.
-func (flu *FlutterEngine) CreatePlatformMessageResponseHandle(callback DataCallback) (PlatformMessageResponseHandle, error) {
+func (flu *FlutterEngine) CreatePlatformMessageResponseHandle(callback *DataCallback) (PlatformMessageResponseHandle, error) {
 	var responseHandle *C.FlutterPlatformMessageResponseHandle
 
-	callbackPointer := uintptr(unsafe.Pointer(&callback))
+	callbackPointer := uintptr(unsafe.Pointer(callback))
 	defer func() {
 		runtime.KeepAlive(callbackPointer)
 	}()
 
 	res := C.createMessageResponseHandle(flu.Engine, unsafe.Pointer(&callbackPointer), &responseHandle)
-	if (Result)(res) != ResultSuccess {
-		return 0, errors.New("failed to create a response handle")
-	}
-	return PlatformMessageResponseHandle(unsafe.Pointer(responseHandle)), nil
+	return PlatformMessageResponseHandle(unsafe.Pointer(responseHandle)), (Result)(res).GoError("engine.CreatePlatformMessageResponseHandle()")
 }
 
 // ReleasePlatformMessageResponseHandle collects a platform message response
@@ -359,7 +440,7 @@ func (flu *FlutterEngine) ReleasePlatformMessageResponseHandle(responseHandle Pl
 	cResponseHandle := (*C.FlutterPlatformMessageResponseHandle)(unsafe.Pointer(responseHandle))
 	res := C.FlutterPlatformMessageReleaseResponseHandle(flu.Engine, cResponseHandle)
 	if (Result)(res) != ResultSuccess {
-		fmt.Printf("go-flutter: failed to collect platform response message handle")
+		fmt.Printf("go-flutter: failed to collect platform response message handle\n")
 	}
 }
 

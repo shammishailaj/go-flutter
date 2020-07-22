@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/go-flutter-desktop/go-flutter/plugin"
-	"github.com/go-gl/glfw/v3.2/glfw"
+	"github.com/go-gl/glfw/v3.3/glfw"
 )
 
 const lifecycleChannelName = "flutter/lifecycle"
@@ -17,8 +17,6 @@ type lifecyclePlugin struct {
 
 // all hardcoded because theres not pluggable renderer system.
 var defaultLifecyclePlugin = &lifecyclePlugin{}
-
-var _ Plugin = &lifecyclePlugin{} // compile-time type check
 
 func (p *lifecyclePlugin) InitPlugin(messenger plugin.BinaryMessenger) error {
 	p.channel = plugin.NewBasicMessageChannel(messenger, lifecycleChannelName, plugin.StringCodec{})

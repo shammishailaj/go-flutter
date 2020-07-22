@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 
-	"github.com/go-gl/glfw/v3.2/glfw"
+	"github.com/go-flutter-desktop/go-flutter/internal/execpath"
 )
 
 type config struct {
 	flutterAssetsPath string
 	icuDataPath       string
+	elfSnapshotpath   string
 	vmArguments       []string
 
 	windowIconProvider      func() ([]image.Image, error)
@@ -18,9 +20,11 @@ type config struct {
 	windowInitialLocation   windowLocation
 	windowDimensionLimits   windowDimensionLimits
 	windowMode              windowMode
+	windowAlwaysOnTop       bool
+	windowTransparent       bool
 
 	forcePixelRatio float64
-	keyboardLayout  KeyboardShortcuts
+	scrollAmount    float64
 
 	plugins []Plugin
 }
@@ -42,15 +46,30 @@ type windowDimensionLimits struct {
 	maxHeight int
 }
 
-// defaultApplicationConfig define the default configuration values for a new
+// newApplicationConfig define the default configuration values for a new
 // Application. These values may be changed at any time.
-var defaultApplicationConfig = config{
-	windowInitialDimensions: windowDimensions{
-		width:  800,
-		height: 600,
-	},
-	keyboardLayout: KeyboardQwertyLayout,
-	windowMode:     WindowModeDefault,
+func newApplicationConfig() config {
+	execPath, err := execpath.ExecPath()
+	if err != nil {
+		fmt.Printf("go-flutter: failed to resolve path for executable: %v", err)
+		os.Exit(1)
+	}
+	return config{
+		windowInitialDimensions: windowDimensions{
+			width:  800,
+			height: 600,
+		},
+		windowMode:        WindowModeDefault,
+		windowAlwaysOnTop: false,
+		windowTransparent: false,
+		scrollAmount:      100.0,
+
+		// Sane configuration values for the engine.
+		flutterAssetsPath: filepath.Join(filepath.Dir(execPath), "flutter_assets"),
+		icuDataPath:       filepath.Join(filepath.Dir(execPath), "icudtl.dat"),
+		// only required for AOT app.
+		elfSnapshotpath: filepath.Join(filepath.Dir(execPath), "libapp.so"),
+	}
 }
 
 // Option for Application
@@ -65,6 +84,19 @@ func ProjectAssetsPath(p string) Option {
 	}
 	return func(c *config) {
 		c.flutterAssetsPath = p
+	}
+}
+
+// ApplicationELFSnapshotPath specify the path to the ELF AOT snapshot.
+// only required by AOT.
+func ApplicationELFSnapshotPath(p string) Option {
+	_, err := os.Stat(p)
+	if err != nil {
+		fmt.Printf("go-flutter: failed to stat ELF snapshot path: %v\n", err)
+		os.Exit(1)
+	}
+	return func(c *config) {
+		c.elfSnapshotpath = p
 	}
 }
 
@@ -154,7 +186,7 @@ func WindowDimensionLimits(minWidth, minHeight, maxWidth, maxHeight int) Option 
 
 // WindowIcon sets an icon provider func, which is called during window
 // initialization. For tips on the kind of images to provide, see
-// https://godoc.org/github.com/go-gl/glfw/v3.2/glfw#Window.SetIcon
+// https://godoc.org/github.com/go-gl/glfw/v3.3/glfw#Window.SetIcon
 func WindowIcon(iconProivder func() ([]image.Image, error)) Option {
 	return func(c *config) {
 		c.windowIconProvider = iconProivder
@@ -170,28 +202,25 @@ func ForcePixelRatio(ratio float64) Option {
 	}
 }
 
+// WindowTransparentBackground sets the init window background to be transparent
+func WindowTransparentBackground(enabled bool) Option {
+	return func(c *config) {
+		c.windowTransparent = enabled
+	}
+}
+
+// WindowAlwaysOnTop sets the application window to be always on top of other windows
+func WindowAlwaysOnTop(enabled bool) Option {
+	return func(c *config) {
+		c.windowAlwaysOnTop = enabled
+	}
+}
+
 // AddPlugin adds a plugin to the flutter application.
 func AddPlugin(p Plugin) Option {
 	return func(c *config) {
 		c.plugins = append(c.plugins, p)
 	}
-}
-
-// OptionKeyboardLayout allow application to support keyboard that have a
-// different layout and therefore different keyboard shortcuts.
-func OptionKeyboardLayout(keyboardLayout KeyboardShortcuts) Option {
-	return func(c *config) {
-		c.keyboardLayout = keyboardLayout
-	}
-}
-
-// KeyboardShortcuts contains the configuration for keyboard shortcut keys. This
-// allows an application to support keyboard layout different from US layout.
-type KeyboardShortcuts struct {
-	Cut       glfw.Key
-	Copy      glfw.Key
-	Paste     glfw.Key
-	SelectAll glfw.Key
 }
 
 // VirtualKeyboardShow sets an func called when the flutter framework want to
@@ -215,5 +244,12 @@ func VirtualKeyboardHide(hideCallback func()) Option {
 		// Reference the callback to the platform plugin (singleton) responsible
 		// for textinput.
 		defaultTextinputPlugin.virtualKeyboardHide = hideCallback
+	}
+}
+
+// ScrollAmount sets the number of pixels to scroll with the mouse wheel
+func ScrollAmount(amount float64) Option {
+	return func(c *config) {
+		c.scrollAmount = amount
 	}
 }

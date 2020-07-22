@@ -1,8 +1,6 @@
 package flutter
 
 import (
-	"fmt"
-
 	"github.com/pkg/errors"
 )
 
@@ -42,24 +40,13 @@ func (p *platformPlugin) handleSystemNavigatorPop(arguments interface{}) (reply 
 	case PopBehaviorNone:
 		return nil, nil
 	case PopBehaviorHide:
-		p.glfwTasker.Do(func() {
-			p.window.Hide()
-		})
+		p.window.Hide()
 		return nil, nil
 	case PopBehaviorIconify:
-		var err error
-		p.glfwTasker.Do(func() {
-			err = p.window.Iconify()
-		})
-		if err != nil {
-			fmt.Printf("go-flutter: error on iconifying window: %v\n", err)
-			return nil, errors.Wrap(err, "failed to iconify window")
-		}
+		p.window.Iconify()
 		return nil, nil
 	case PopBehaviorClose:
-		p.glfwTasker.Do(func() {
-			p.window.SetShouldClose(true)
-		})
+		p.window.SetShouldClose(true)
 		return nil, nil
 	default:
 		return nil, errors.Errorf("unknown pop behavior %T not implemented by platform handler", p.popBehavior)
